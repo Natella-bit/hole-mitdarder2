@@ -1,0 +1,578 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
+import { Trophy, Activity, CheckCircle, XCircle, ArrowLeft, ArrowRight, Hospital, User, Play, List, AlertCircle, Crown } from 'lucide-react';
+
+// --- Assets ---
+const ZIV_LOGO_URL = "ziv-logo-updated.png";
+
+// --- Firebase Initialization ---
+let app, auth, db, appId;
+try {
+  const firebaseConfigStr = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+  if (firebaseConfigStr) {
+    const firebaseConfig = JSON.parse(firebaseConfigStr);
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    appId = typeof __app_id !== 'undefined' ? __app_id : 'ziv-simulator-app';
+  }
+} catch (error) {
+  console.error("Firebase init error:", error);
+}
+
+// --- Data: Cases from the PDF ---
+const CASES = [
+  {
+    id: 1,
+    title: "מקרה 1: מטופל במחלקה כירורגית",
+    description: "מטופל בן 65 מאושפז לאחר ניתוח בטן. בבדיקת מדדים שגרתית: קצב נשימות 22 לדקה, סטורציה 94% באוויר חדר, דופק 95, לחץ דם 105/70, חום 37.8, המטופל עירני ובהכרה מלאה.",
+    question: "מהו הציון הכולל במודל NEWS ומהי ההתערבות הנדרשת?",
+    options: [
+      { id: 'a', text: 'ציון 3 (סיכון נמוך) - הערכה יומית במשמרת בוקר.', isCorrect: false },
+      { id: 'b', text: 'ציון 5 (סיכון בינוני) - דיווח לרופא תורן, מדידת מדדים 3 פעמים במשמרת.', isCorrect: true },
+      { id: 'c', text: 'ציון 7 (סיכון גבוה) - ניטור רציף וקריאה דחופה לרופא.', isCorrect: false },
+      { id: 'd', text: 'אין סכנה - להמשיך מעקב שגרתי של פעם ביום.', isCorrect: false }
+    ],
+    explanation: "ציון 5: נשימות 22 (+2 נק'), סטורציה 94% חדר (+1 נק'), דופק 95 (+1 נק'), ססטולי 105 (+1 נק'). שאר המדדים תקינים. סה\"כ 5 = 'סיכון בינוני'. יש לדווח לרופא ולמדוד מדדים 3 פעמים במשמרת."
+  },
+  {
+    id: 2,
+    title: "מקרה 2: מטופלת בפנימית עם החמרה",
+    description: "מטופלת בת 72 עם דלקת ריאות. כעת מבולבלת (מגיבה לקול בלבד). מדדים: נעזרת בחמצן, קצב נשימות 26, סטורציה 90%, דופק 115, ל\"ד 95/60.",
+    question: "מהי רמת הסיכון וכיצד לפעול?",
+    options: [
+      { id: 'a', text: 'סיכון בינוני - להגביר מתן חמצן ולהזמין רופא בבוקר.', isCorrect: false },
+      { id: 'b', text: 'סיכון גבוה (ציון 7+) - ניטור רציף, קריאה לרופא תורן והתייעצות כונן.', isCorrect: true },
+      { id: 'c', text: 'סיכון נמוך - הבלבול נובע מגילה.', isCorrect: false },
+      { id: 'd', text: 'סיכון בינוני - דיווח לרופא ומעקב 3 פעמים במשמרת.', isCorrect: false }
+    ],
+    explanation: "ציון גבוה מ-7 (נשימות 26 = +3, סט' 90% = +3, חמצן = +2, דופק 115 = +2, ססטולי 95 = +2, תגובה לקול = +3). סכנה חמורה! נדרש ניטור רציף וקריאה מיידית לרופא."
+  },
+  {
+    id: 3,
+    title: "מקרה 3: מחלקת ילדים (PEWS)",
+    description: "ילד בן 4, מאושפז עקב אסטמה. משחק וורוד, אך משתמש בשרירי עזר וקצב נשימות גבוה ב-15 מהנורמה. ללא חמצן.",
+    question: "באיזו דרגת סיכון (PEWS) הוא נמצא ומה ההתערבות?",
+    options: [
+      { id: 'a', text: 'סיכון נמוך - הערכת PEWS כל 4 שעות.', isCorrect: false },
+      { id: 'b', text: 'סיכון גבוה - טיפול נמרץ וניטור רציף.', isCorrect: false },
+      { id: 'c', text: 'סיכון בינוני - דיווח לאחמ"ש/רופא, הערכה כל שעתיים.', isCorrect: true },
+      { id: 'd', text: 'אין סכנה - הילד משחק ומתנהג כרגיל.', isCorrect: false }
+    ],
+    explanation: "למרות התנהגות תקינה, שימוש בשרירי עזר וקצב נשימה חריג ממקמים אותו ב'סיכון בינוני'. יש לדווח לאחמ\"ש/רופא ולבצע הערכה כל שעתיים."
+  },
+  {
+    id: 4,
+    title: "מקרה 4: איתור חריגה - פעולה ראשונית",
+    description: "במשמרת גילית ירידה משמעותית בלחץ הדם של מטופל.",
+    question: "מהי הפעולה המובנית הראשונה על פי נוהל 'המטופל המתדרדר'?",
+    options: [
+      { id: 'a', text: 'להעביר לחדר החייאה באופן מיידי.', isCorrect: false },
+      { id: 'b', text: 'ביצוע אומדן מקיף (NEWS/PEWS) לקביעת רמת הסיכון.', isCorrect: true },
+      { id: 'c', text: 'לפתוח וריד ולהתחיל מתן נוזלים.', isCorrect: false },
+      { id: 'd', text: 'לדווח למנהל המחלקה.', isCorrect: false }
+    ],
+    explanation: "סעיף 6.4.1: כאשר מזוהה חריגה, הפעולה הראשונה של צוות הסיעוד היא לבצע אומדן מלא באמצעות מודל הסיכון (NEWS/PEWS) כדי לכמת את הסיכון."
+  },
+  {
+    id: 5,
+    title: "מקרה 5: חשיבה קלינית ו-NEWS",
+    description: "מטופל בן 70 עם COPD. סטורציה באוויר חדר: 91%.",
+    question: "כיצד להתייחס למדד הסטורציה על פי ההערות לנוהל?",
+    options: [
+      { id: 'a', text: 'להפעיל שיקול דעת קליני, כיוון שיעדי סטורציה בחולי COPD שונים.', isCorrect: true },
+      { id: 'b', text: 'להוסיף 3 נקודות ל-NEWS ולהזעיק רופא מיד.', isCorrect: false },
+      { id: 'c', text: 'המודל אינו תקף לחולי COPD.', isCorrect: false },
+      { id: 'd', text: 'לחבר לחמצן עד הגעה ל-100%.', isCorrect: false }
+    ],
+    explanation: "בנספח 1 נכתב: 'במטופלי COPD... יש להפעיל שיקול דעת נוסף'. יש לאזן בין המודל לבין ההבנה שחולי COPD לרוב עם יעדי סטורציה נמוכים יותר."
+  },
+  {
+    id: 6,
+    title: "מקרה 6: חריגה קיצונית במדד בודד (Red Score)",
+    description: "מטופל במחלקה הפנימית. סך הציון שלו במודל NEWS הוא 4 נקודות בלבד, אך קצב הנשימות שלו הוא 8 לדקה (המזכה ב-3 נקודות בסעיף זה בלבד).",
+    question: "על פי מודל NEWS, כיצד יש להתייחס למצב זה?",
+    options: [
+      { id: 'a', text: 'הציון הכולל הוא 4 (סיכון נמוך), לכן יש להמשיך מעקב שגרתי.', isCorrect: false },
+      { id: 'b', text: 'ציון של 3 במדד בודד מחייב התייחסות כסיכון גבוה וקריאה דחופה לצוות הרפואי.', isCorrect: true },
+      { id: 'c', text: 'יש להמתין שעה ולמדוד שוב, ורק אם המדד נשאר נמוך לקרוא לרופא.', isCorrect: false },
+      { id: 'd', text: 'קצב נשימה 8 הוא תקין בזמן מנוחה ואין צורך בהתערבות.', isCorrect: false }
+    ],
+    explanation: "במודל NEWS, קבלת ציון מקסימלי (3 נקודות) במדד בודד (Red Score) מהווה דגל אדום ומחייבת תגובה קלינית דחופה (רמת סיכון בינונית-גבוהה), גם אם הסכום הכולל של שאר המדדים נמוך."
+  },
+  {
+    id: 7,
+    title: "מקרה 7: תקשורת קלינית אפקטיבית",
+    description: "חישבת ציון NEWS של 8 למטופלת עם חשד לאלח דם (ספסיס). אתה מתקשר לרופא התורן כדי לדווח על ההתדרדרות הקריטית.",
+    question: "באיזו שיטה מובנית עליך להשתמש בעת הדיווח לרופא על פי הנוהל?",
+    options: [
+      { id: 'a', text: 'ABCD (נתיב אוויר, נשימה, מחזור דם, מצב נוירולוגי).', isCorrect: false },
+      { id: 'b', text: 'SBAR (מצב, רקע, הערכה, המלצה).', isCorrect: true },
+      { id: 'c', text: 'AVPU (הכרה, תגובה לקול, תגובה לכאב, חוסר תגובה).', isCorrect: false },
+      { id: 'd', text: 'דיווח חופשי לפי סדר חשיבות המדדים שחרגו.', isCorrect: false }
+    ],
+    explanation: "תקשורת יעילה היא קריטית בזמן התדרדרות. נוהל 'המטופל המתדרדר' דורש שימוש בכלי SBAR (Situation, Background, Assessment, Recommendation) כדי להבטיח העברת מידע מדויקת, מהירה וברורה המאפשרת לרופא לקבל החלטות מבוססות."
+  },
+  {
+    id: 8,
+    title: "מקרה 8: שינוי במצב ההכרה (AVPU)",
+    description: "מטופל בן 55 במחלקה האורתופדית. המדדים תקינים (דופק 75, ל\"ד 120/80, נשימות 16, סטורציה 98%), אך בניגוד לבוקר שבו היה עירני לחלוטין, כעת הוא מגיב רק לכאב (Pain).",
+    question: "מה המשמעות של מצב זה במודל NEWS?",
+    options: [
+      { id: 'a', text: 'מכיוון ששאר המדדים ההמודינמיים תקינים, אין סכנה קרובה.', isCorrect: false },
+      { id: 'b', text: 'מצב הכרה נמדד רק במודל גלזגו (GCS) ולא רלוונטי ל-NEWS.', isCorrect: false },
+      { id: 'c', text: 'תוספת של נקודה אחת בלבד לציון הכללי.', isCorrect: false },
+      { id: 'd', text: 'המטופל מקבל אוטומטית 3 נקודות על סעיף ההכרה, המצביע על התדרדרות הדורשת בדיקה דחופה.', isCorrect: true }
+    ],
+    explanation: "במודל NEWS, סולם AVPU משמש להערכת הכרה. כל ירידה ממצב עירנות מלאה (A) למצב של תגובה לקול (V), לכאב (P) או חוסר תגובה (U) מזכה ב-3 נקודות באופן אוטומטי, ומהווה סימן אזהרה קריטי המחייב הערכה רפואית דחופה."
+  },
+  {
+    id: 9,
+    title: "מקרה 9: הערכה מחדש לאחר התערבות",
+    description: "זיהית התדרדרות (NEWS 6), קראת לרופא, והוא הורה על מתן עירוי נוזלים מהיר (Bolus). המטופל קיבל את הטיפול במלואו.",
+    question: "מתי יש לבצע הערכת מדדים (NEWS) מחדש על מנת לבחון את יעילות הטיפול?",
+    options: [
+      { id: 'a', text: 'בסוף המשמרת, טרם העברת מקל לאחות הבאה.', isCorrect: false },
+      { id: 'b', text: 'רק אם המטופל או בני משפחתו מתלוננים על החמרה נוספת.', isCorrect: false },
+      { id: 'c', text: 'תוך פרק זמן קצר (לרוב עד כשעה) או לפי הנחיה קלינית מפורשת של הרופא המטפל.', isCorrect: true },
+      { id: 'd', text: 'אין צורך לחשב NEWS מחדש, הטיפול שהורה הרופא כבר ניתן.', isCorrect: false }
+    ],
+    explanation: "מעגל הטיפול אינו מסתיים במתן ההוראה. לאחר התערבות קלינית עקב התדרדרות, חובה לבצע אומדן מדדים וחישוב NEWS מחדש תוך זמן קצר כדי לוודא שהטיפול אכן השפיע ושהמטופל יצא מכלל סכנה או התייצב."
+  }
+];
+
+const DEPARTMENTS = [
+  "פנימית א'", "פנימית ב'", "כירורגיה", "אורתופדיה", 
+  "ילדים", "טיפול נמרץ פג", "יולדות", "נשים", "מיון", "הרדמה / התאוששות"
+];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [gameState, setGameState] = useState('welcome'); // welcome, playing, feedback, result, leaderboard
+  const [playerName, setPlayerName] = useState('');
+  const [department, setDepartment] = useState('');
+  const [currentCaseIndex, setCurrentCaseIndex] = useState(0);
+  const [score, setScore] = useState(0);
+  const [selectedOption, setSelectedOption] = useState(null);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [leaderboardData, setLeaderboardData] = useState([]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [imageError, setImageError] = useState(false);
+
+  // Initialize Firebase Auth
+  useEffect(() => {
+    if (!auth) return;
+
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // Fetch Leaderboard Data
+  useEffect(() => {
+    if (!user || !db) return;
+
+    const scoresRef = collection(db, 'artifacts', appId, 'public', 'data', 'scores');
+    const unsubscribe = onSnapshot(
+      scoresRef,
+      (snapshot) => {
+        const deptStats = {};
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          if (!deptStats[data.department]) {
+            deptStats[data.department] = { name: data.department, totalScore: 0, participants: 0 };
+          }
+          deptStats[data.department].totalScore += data.score;
+          deptStats[data.department].participants += 1;
+        });
+
+        const sortedLeaderboard = Object.values(deptStats).sort((a, b) => {
+          if (b.totalScore === a.totalScore) return b.participants - a.participants;
+          return b.totalScore - a.totalScore;
+        });
+        
+        setLeaderboardData(sortedLeaderboard);
+      },
+      (err) => console.error("Error fetching leaderboard:", err)
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  const handleStartGame = () => {
+    if (!playerName.trim() || !department) {
+      setErrorMsg('אנא הזן שם ובחר מחלקה כדי להתחיל.');
+      return;
+    }
+    setErrorMsg('');
+    setCurrentCaseIndex(0);
+    setScore(0);
+    setGameState('playing');
+  };
+
+  const handleAnswerSubmit = (option) => {
+    setSelectedOption(option);
+    if (option.isCorrect) {
+      setScore(prev => prev + 20);
+    }
+    setGameState('feedback');
+  };
+
+  const handleNextCase = async () => {
+    setSelectedOption(null);
+    if (currentCaseIndex < CASES.length - 1) {
+      setCurrentCaseIndex(prev => prev + 1);
+      setGameState('playing');
+    } else {
+      setGameState('result');
+      await saveFinalScore();
+    }
+  };
+
+  const saveFinalScore = async () => {
+    if (!user || !db) return;
+    setIsSaving(true);
+    try {
+      const scoresRef = collection(db, 'artifacts', appId, 'public', 'data', 'scores');
+      await addDoc(scoresRef, {
+        userId: user.uid,
+        name: playerName,
+        department: department,
+        score: score, // Already updated in handleAnswerSubmit if correct
+        timestamp: serverTimestamp()
+      });
+    } catch (err) {
+      console.error("Error saving score:", err);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const BrandHeader = ({ compact = false }) => (
+    <div className={`flex flex-col items-center justify-center ${compact ? 'mb-6' : 'mb-8'}`}>
+        {!imageError ? (
+          <img 
+            src={ZIV_LOGO_URL} 
+            alt="מרכז רפואי זיו" 
+            className={`${compact ? 'h-16' : 'h-24'} object-contain mb-4`} 
+            onError={() => setImageError(true)}
+          />
+        ) : (
+          <div className="bg-[#143d7d] text-white p-4 rounded-2xl mb-4 shadow-md flex items-center justify-center">
+            <Activity size={compact ? 32 : 48} className="text-[#f26522]" />
+          </div>
+        )}
+        
+        {!compact && (
+          <div className="text-center">
+             <h1 className="text-3xl font-bold text-[#143d7d] mb-1">סימולטור צוות סיעודי</h1>
+             <h2 className="text-xl text-[#f26522] font-semibold flex items-center justify-center gap-2">
+               <AlertCircle size={20} /> איתור "המטופל המתדרדר"
+             </h2>
+          </div>
+        )}
+    </div>
+  );
+
+  const renderWelcome = () => (
+    <div className="flex flex-col items-center justify-center min-h-[80vh] p-4 md:p-6 animate-in fade-in duration-500">
+      <BrandHeader />
+      <p className="text-slate-600 mb-8 max-w-lg mx-auto text-center font-medium bg-white p-4 rounded-xl shadow-sm border border-[#eef2f6]">
+        תרגל את הידע שלך בנוהל (NEWS / PEWS), צבור נקודות אישיות והובל את המחלקה שלך למקום הראשון בטבלת האלופים של בית החולים.
+      </p>
+
+      <div className="bg-white p-6 md:p-8 rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.08)] border-t-4 border-t-[#f26522] border-x border-b border-slate-100 w-full max-w-md space-y-6">
+        <div className="space-y-5 text-right">
+          <div>
+            <label className="block text-sm font-bold text-[#143d7d] mb-2 flex items-center">
+              <User size={16} className="ml-2 text-[#f26522]" /> שם מלא / כינוי
+            </label>
+            <input 
+              type="text" 
+              className="w-full border-2 border-slate-200 rounded-lg p-3 focus:ring-0 focus:border-[#f26522] outline-none transition-colors bg-slate-50 focus:bg-white text-right"
+              placeholder="הזן את שמך..."
+              value={playerName}
+              onChange={(e) => setPlayerName(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-bold text-[#143d7d] mb-2 flex items-center">
+              <Hospital size={16} className="ml-2 text-[#f26522]" /> מחלקה
+            </label>
+            <select 
+              className="w-full border-2 border-slate-200 rounded-lg p-3 bg-slate-50 focus:bg-white focus:ring-0 focus:border-[#f26522] outline-none transition-colors text-right appearance-none"
+              value={department}
+              onChange={(e) => setDepartment(e.target.value)}
+              dir="rtl"
+            >
+              <option value="" disabled>בחר מחלקה...</option>
+              {DEPARTMENTS.map(dept => (
+                <option key={dept} value={dept}>{dept}</option>
+              ))}
+            </select>
+          </div>
+          {errorMsg && <p className="text-red-500 text-sm font-bold bg-red-50 p-2 rounded text-center">{errorMsg}</p>}
+        </div>
+
+        <div className="pt-2 space-y-3">
+          <button 
+            onClick={handleStartGame}
+            className="w-full bg-[#f26522] hover:bg-[#d95517] text-white font-bold py-3.5 px-4 rounded-lg flex items-center justify-center transition-colors shadow-md"
+          >
+            <Play size={20} className="ml-2" /> התחל תרגול
+          </button>
+          
+          <button 
+            onClick={() => setGameState('leaderboard')}
+            className="w-full bg-white hover:bg-slate-50 text-[#143d7d] border-2 border-[#143d7d] font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors"
+          >
+            <Trophy size={20} className="ml-2" /> לוח תוצאות מחלקות
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderQuiz = () => {
+    const currentCase = CASES[currentCaseIndex];
+    return (
+      <div className="w-full max-w-3xl mx-auto p-4 md:p-6 animate-in slide-in-from-bottom-4 duration-300">
+        <BrandHeader compact={true} />
+        <div className="flex justify-between items-center mb-4">
+          <span className="bg-[#143d7d] text-white text-sm font-bold px-4 py-1.5 rounded-full shadow-sm">
+            שאלה {currentCaseIndex + 1} / {CASES.length}
+          </span>
+          <span className="bg-white border border-[#f26522] text-[#143d7d] font-bold text-sm px-4 py-1.5 rounded-full shadow-sm flex items-center">
+             ניקוד: <span className="text-[#f26522] mr-1.5">{score}</span>
+          </span>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden mb-6">
+          <div className="bg-[#143d7d] p-5 md:p-6 text-white border-b-4 border-[#f26522]">
+            <h2 className="text-xl md:text-2xl font-bold mb-3 flex items-center">
+              <Activity className="ml-3 text-[#f26522]" size={28} />
+              {currentCase.title}
+            </h2>
+            <p className="text-blue-50 leading-relaxed text-sm md:text-base font-medium bg-white/10 p-4 rounded-lg">
+              {currentCase.description}
+            </p>
+          </div>
+          <div className="p-6 md:p-8 bg-slate-50">
+            <p className="font-bold text-[#143d7d] mb-6 text-lg md:text-xl">
+              {currentCase.question}
+            </p>
+            <div className="space-y-4">
+              {currentCase.options.map((option) => (
+                <button
+                  key={option.id}
+                  onClick={() => handleAnswerSubmit(option)}
+                  className="w-full text-right p-4 md:p-5 rounded-xl border-2 border-slate-200 bg-white hover:border-[#f26522] hover:bg-[#fff7f4] transition-all font-semibold text-slate-700 shadow-sm outline-none group"
+                >
+                  <div className="flex items-start">
+                    <span className="flex-shrink-0 w-8 h-8 rounded-full bg-slate-100 text-slate-500 flex items-center justify-center ml-4 group-hover:bg-[#f26522] group-hover:text-white transition-colors">
+                      {option.id.toUpperCase()}
+                    </span>
+                    <span className="pt-1">{option.text}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderFeedback = () => {
+    const currentCase = CASES[currentCaseIndex];
+    const isCorrect = selectedOption.isCorrect;
+
+    return (
+      <div className="w-full max-w-3xl mx-auto p-4 md:p-6 animate-in zoom-in-95 duration-300">
+        <BrandHeader compact={true} />
+        <div className={`rounded-2xl shadow-lg border-2 overflow-hidden mb-6 ${isCorrect ? 'border-emerald-500 bg-emerald-50' : 'border-red-500 bg-red-50'}`}>
+          <div className="p-8 md:p-10 text-center">
+            {isCorrect ? (
+              <div className="inline-block bg-white p-3 rounded-full mb-4 shadow-sm">
+                 <CheckCircle size={60} className="text-emerald-500" />
+              </div>
+            ) : (
+              <div className="inline-block bg-white p-3 rounded-full mb-4 shadow-sm">
+                 <XCircle size={60} className="text-red-500" />
+              </div>
+            )}
+            
+            <h2 className={`text-2xl md:text-3xl font-bold mb-3 ${isCorrect ? 'text-emerald-700' : 'text-red-700'}`}>
+              {isCorrect ? 'תשובה נכונה!' : 'תשובה שגויה...'}
+            </h2>
+            
+            <p className="text-slate-700 font-medium mb-8 bg-white/50 p-4 rounded-lg inline-block text-right border border-black/5">
+              <span className="block text-sm text-slate-500 mb-1">התשובה שבחרת:</span>
+              {selectedOption.text}
+            </p>
+            
+            <div className="bg-white rounded-xl p-6 md:p-8 shadow-md border-r-4 border-r-[#143d7d] border-y border-l border-slate-200 text-right">
+              <h3 className="font-bold text-[#143d7d] mb-3 flex items-center text-lg">
+                <List size={22} className="ml-2 text-[#f26522]" />
+                הסבר ע"פ נוהל "המטופל המתדרדר":
+              </h3>
+              <p className="text-slate-700 leading-relaxed text-base font-medium">
+                {currentCase.explanation}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="flex justify-center">
+          <button 
+            onClick={handleNextCase}
+            className="bg-[#143d7d] hover:bg-[#0c2652] text-white font-bold py-4 px-10 rounded-xl flex items-center justify-center transition-colors shadow-lg text-lg w-full md:w-auto"
+          >
+             {currentCaseIndex < CASES.length - 1 ? 'המשך למקרה הבא' : 'סיום סימולציה'} <ArrowLeft size={24} className="mr-3" />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderResult = () => {
+    const finalScore = score;
+    const isPerfect = finalScore === 100;
+    const passed = finalScore >= 60;
+
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[80vh] text-center p-4 md:p-6 animate-in slide-in-from-bottom-8 duration-700">
+        <BrandHeader compact={true} />
+        <div className="bg-white p-8 md:p-12 rounded-3xl shadow-2xl border-t-8 border-t-[#f26522] border-x border-b border-slate-100 w-full max-w-lg relative overflow-hidden">
+          <div className="bg-slate-50 w-24 h-24 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner border border-slate-200">
+            <Trophy size={48} className={`${isPerfect ? 'text-[#f26522]' : passed ? 'text-[#143d7d]' : 'text-slate-400'}`} />
+          </div>
+          
+          <h2 className="text-3xl font-bold text-[#143d7d] mb-2">סיכום תרגול</h2>
+          <p className="text-xl text-slate-600 mb-8 font-medium">{playerName} | {department}</p>
+          
+          <div className="bg-gradient-to-bl from-slate-50 to-slate-100 rounded-2xl p-8 border border-slate-200 mb-8 shadow-sm">
+            <p className="text-sm font-bold text-slate-500 mb-2 uppercase tracking-wide">הציון הסופי שלך</p>
+            <p className={`text-7xl font-black ${isPerfect ? 'text-[#f26522]' : passed ? 'text-[#143d7d]' : 'text-red-500'}`}>
+              {finalScore}
+            </p>
+            <div className="mt-4 inline-block bg-[#143d7d] text-white text-xs font-bold px-3 py-1 rounded-full">
+              נקודות נתרמו למחלקה
+            </div>
+          </div>
+
+          <p className="text-slate-700 mb-10 font-medium px-4">
+            {isPerfect ? 'מעולה! הפגנת שליטה מלאה בנוהל. המחלקה שלך בדרך למעלה!' : 
+             passed ? 'תוצאה טובה. מומלץ לחזור על ההסברים כדי להגיע לשליטה מלאה.' : 
+             'יש צורך ברענון. אנא עבור שוב על נוהל 005-310-01 המטופל המתדרדר.'}
+          </p>
+
+          <div className="space-y-3">
+            <button 
+              onClick={() => setGameState('leaderboard')}
+              disabled={isSaving}
+              className="w-full bg-[#f26522] hover:bg-[#d95517] text-white font-bold py-4 px-6 rounded-xl flex items-center justify-center transition-colors shadow-md text-lg disabled:opacity-70"
+            >
+              {isSaving ? 'מעדכן נתונים...' : 'צפה בטבלת המחלקות'} <Crown size={20} className="mr-3" />
+            </button>
+            <button 
+              onClick={() => setGameState('welcome')}
+              className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 px-6 rounded-xl flex items-center justify-center transition-colors text-base"
+            >
+              חזרה לתפריט הראשי
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderLeaderboard = () => (
+    <div className="w-full max-w-4xl mx-auto p-4 md:p-8 animate-in fade-in duration-500">
+      <div className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4 border-b-2 border-slate-100 pb-6">
+        <div className="flex items-center gap-3">
+          <Trophy size={36} className="text-[#f26522]" />
+          <h2 className="text-3xl font-bold text-[#143d7d]">טבלת אלופים - מחלקות</h2>
+        </div>
+        <button 
+          onClick={() => setGameState('welcome')}
+          className="bg-white border-2 border-[#143d7d] text-[#143d7d] hover:bg-slate-50 font-bold py-2 px-6 rounded-lg flex items-center transition-colors"
+        >
+          <ArrowRight size={20} className="ml-2" /> חזרה לתפריט
+        </button>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div className="bg-[#143d7d] text-white px-6 py-4 grid grid-cols-12 gap-4 font-bold text-lg">
+          <div className="col-span-2 md:col-span-1 text-center">דירוג</div>
+          <div className="col-span-5 md:col-span-7">מחלקה</div>
+          <div className="col-span-5 md:col-span-4 text-left">ניקוד מצטבר</div>
+        </div>
+        
+        {leaderboardData.length === 0 ? (
+          <div className="p-10 text-center text-slate-500 font-medium">
+            עדיין אין נתונים בטבלה. תהיה הראשון לייצג את המחלקה שלך!
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {leaderboardData.map((dept, index) => (
+              <div 
+                key={dept.name} 
+                className={`px-6 py-5 grid grid-cols-12 gap-4 items-center transition-colors hover:bg-slate-50 ${index === 0 ? 'bg-[#fff7f4]' : ''}`}
+              >
+                <div className="col-span-2 md:col-span-1 flex justify-center">
+                  {index === 0 ? (
+                    <Crown size={28} className="text-[#f26522]" />
+                  ) : index === 1 ? (
+                    <span className="text-2xl font-bold text-slate-400">2</span>
+                  ) : index === 2 ? (
+                    <span className="text-2xl font-bold text-amber-700">3</span>
+                  ) : (
+                    <span className="text-xl font-bold text-slate-300">{index + 1}</span>
+                  )}
+                </div>
+                <div className="col-span-5 md:col-span-7">
+                  <span className={`font-bold text-lg ${index === 0 ? 'text-[#f26522]' : 'text-[#143d7d]'}`}>
+                    {dept.name}
+                  </span>
+                  <div className="text-sm text-slate-500 mt-1">
+                    {dept.participants} אנשי צוות תרגלו
+                  </div>
+                </div>
+                <div className="col-span-5 md:col-span-4 text-left">
+                  <span className="text-2xl font-black text-[#143d7d]">
+                    {dept.totalScore}
+                  </span>
+                  <span className="text-sm text-slate-500 mr-1">נק'</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans text-right" dir="rtl" style={{ fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+      {gameState === 'welcome' && renderWelcome()}
+      {gameState === 'playing' && renderQuiz()}
+      {gameState === 'feedback' && renderFeedback()}
+      {gameState === 'result' && renderResult()}
+      {gameState === 'leaderboard' && renderLeaderboard()}
+    </div>
+  );
+}
